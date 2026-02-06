@@ -16,7 +16,7 @@
  * Plugin Name:       MailMunch - Grow Your Email List
  * Plugin URI:        http://www.mailmunch.com
  * Description:       The best free plugin to get more email subscribers. Beautiful signup forms and landing pages that integrate with MailChimp, Constant Contact, AWeber, Campaign Monitor and more.
- * Version:           3.2.0
+ * Version:           3.2.1
  * Author:            MailMunch
  * Author URI:        http://www.mailmunch.com
  * License:           GPL-2.0+

@@ -23,7 +23,7 @@ define( 'MAILMUNCH_SLUG', "mailmunch" );
 define( 'MAILMUNCH_PREFIX', 'mailmunch' );
 define( 'MAILMUNCH_POST_TYPE', 'mailmunch_page' );
 define( 'MAILMUNCH_PLUGIN_DIRECTORY', 'mailmunch' );
-define( 'MAILMUNCH_VERSION', '3.2.0' );
+define( 'MAILMUNCH_VERSION', '3.2.1' );
 
 /**
  * The core plugin class.
