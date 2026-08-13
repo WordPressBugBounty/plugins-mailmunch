@@ -42,6 +42,15 @@ class Mailmunch_Loader {
 	protected $filters;
 
 	/**
+	 * Whether run() has already registered hooks with WordPress.
+	 *
+	 * @since    3.3.0
+	 * @access   protected
+	 * @var      bool
+	 */
+	protected $has_run = false;
+
+	/**
 	 * Initialize the collections used to maintain the actions and filters.
 	 *
 	 * @since    2.0.0
@@ -65,6 +74,10 @@ class Mailmunch_Loader {
 	 */
 	public function add_action( $hook, $component, $callback, $priority = 10, $accepted_args = 1 ) {
 		$this->actions = $this->add( $this->actions, $hook, $component, $callback, $priority, $accepted_args );
+		if ( $this->has_run ) {
+			$registered = end( $this->actions );
+			add_action( $registered['hook'], array( $registered['component'], $registered['callback'] ), $registered['priority'], $registered['accepted_args'] );
+		}
 	}
 
 	/**
@@ -79,6 +92,10 @@ class Mailmunch_Loader {
 	 */
 	public function add_filter( $hook, $component, $callback, $priority = 10, $accepted_args = 1 ) {
 		$this->filters = $this->add( $this->filters, $hook, $component, $callback, $priority, $accepted_args );
+		if ( $this->has_run ) {
+			$registered = end( $this->filters );
+			add_filter( $registered['hook'], array( $registered['component'], $registered['callback'] ), $registered['priority'], $registered['accepted_args'] );
+		}
 	}
 
 	/**
@@ -123,6 +140,8 @@ class Mailmunch_Loader {
 		foreach ( $this->actions as $hook ) {
 			add_action( $hook['hook'], array( $hook['component'], $hook['callback'] ), $hook['priority'], $hook['accepted_args'] );
 		}
+
+		$this->has_run = true;
 
 	}
 

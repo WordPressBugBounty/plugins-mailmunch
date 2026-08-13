@@ -19,11 +19,12 @@ define( 'MAILMUNCH_URL_SECURED', "https://wordpress.mailmunch.com" );
 define( 'MAILMUNCH_HOME_URL', "https://app.mailmunch.com" );
 define( 'MAILMUNCH_LANDING_PAGE_URL', "https://wordpress.mailmunch.com" );
 define( 'MAILMUNCH_PAGE_SERVICE_URL', "http://wordpress.page.co" );
+define( 'MAILMUNCH_WEBHOOKS_URL', "https://webhooks.mailmunch.com/woocommerce/webhook" );
 define( 'MAILMUNCH_SLUG', "mailmunch" );
 define( 'MAILMUNCH_PREFIX', 'mailmunch' );
 define( 'MAILMUNCH_POST_TYPE', 'mailmunch_page' );
 define( 'MAILMUNCH_PLUGIN_DIRECTORY', 'mailmunch' );
-define( 'MAILMUNCH_VERSION', '3.2.2' );
+define( 'MAILMUNCH_VERSION', '3.2.3' );
 
 /**
  * The core plugin class.
@@ -112,6 +113,8 @@ class Mailmunch {
 		if (empty($landingPagesEnabled) || $landingPagesEnabled == 'yes') {
 			$this->define_post_type();
 		}
+		// Defer until all plugins load — MailMunch bootstraps before WooCommerce alphabetically.
+		$this->loader->add_action( 'plugins_loaded', $this, 'define_woocommerce_hooks', 20 );
 	}
 
 	/**
@@ -230,6 +233,30 @@ class Mailmunch {
 		$exploded = explode('/', $pluginBaseName);
 		$pluginFilePath = $exploded[0]. '/mailmunch.php';
 		$this->loader->add_filter( 'plugin_action_links_'. $pluginFilePath, $plugin_admin, 'settings_link');
+	}
+
+	/**
+	 * Register WooCommerce customer sync when WooCommerce is active.
+	 *
+	 * @since    3.3.0
+	 * @access   public
+	 */
+	public function define_woocommerce_hooks() {
+		if ( ! class_exists( 'WooCommerce' ) ) {
+			return;
+		}
+
+		static $loaded = false;
+		if ( $loaded ) {
+			return;
+		}
+		$loaded = true;
+
+		require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/woocommerce/class-mailmunch-woocommerce.php';
+
+		$api = new Mailmunch_Api();
+		$woocommerce = new Mailmunch_Woocommerce( $this->get_plugin_name(), $api );
+		$woocommerce->register_hooks( $this->loader );
 	}
 
 	/**

@@ -381,6 +381,10 @@
       delete_option($this->getPrefix(). 'class-mailmunchlist_id');
     }
     
+    function setRequestType($type) {
+      $this->requestType = $type;
+    }
+
     function ping($path, $options=array(), $useTokenAuth=true) {
       $type = $this->requestType;
       $url = $this->base_url. $path;
