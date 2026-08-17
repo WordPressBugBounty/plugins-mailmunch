@@ -16,10 +16,36 @@ class Mailmunch_Woocommerce {
   /** @var array<int,array> Order payloads cached before trash/delete (WC deleted webhooks only send {id}). */
   protected $deleted_order_snapshots = array();
 
-  public function __construct( $plugin_name, $api ) {
+  /** Snapshots must outlive an Action Scheduler backlog, so give them a generous TTL. */
+  const SNAPSHOT_TTL = DAY_IN_SECONDS;
+
+  public function __construct( $plugin_name, $api = null ) {
     $this->plugin_name = $plugin_name;
     $this->api = $api;
     $this->prefix = MAILMUNCH_PREFIX . '_';
+  }
+
+  /**
+   * Lazily build the API client.
+   *
+   * Mailmunch_Api::__construct() calls ensureUser() + findOrCreateSite(), which issue
+   * blocking wp_remote_* requests with a 120 second timeout. register_hooks() runs on
+   * every single request, so the client must never be built there — only on the handful
+   * of paths that genuinely talk to MailMunch.
+   */
+  protected function api() {
+    if ( ! $this->api instanceof Mailmunch_Api ) {
+      $this->api = new Mailmunch_Api();
+    }
+    return $this->api;
+  }
+
+  /**
+   * Site id straight from options — no API client, so this is safe on hot paths
+   * such as webhook delivery.
+   */
+  protected function get_site_id() {
+    return get_option( $this->prefix . 'site_id' );
   }
 
   public function register_hooks( $loader ) {
@@ -27,6 +53,7 @@ class Mailmunch_Woocommerce {
     $loader->add_action( 'admin_enqueue_scripts', $this, 'enqueue_scripts' );
     $loader->add_action( 'wp_ajax_mailmunch_woo_connect', $this, 'ajax_connect' );
     $loader->add_action( 'wp_ajax_mailmunch_woo_disconnect', $this, 'ajax_disconnect' );
+    $loader->add_action( 'wp_ajax_mailmunch_woo_repair_webhooks', $this, 'ajax_repair_webhooks' );
     $loader->add_action( 'woocommerce_created_customer', $this, 'save_user_consent', 5, 1 );
     $loader->add_action( 'set_user_role', $this, 'save_user_consent_on_role', 5, 3 );
     $loader->add_action( 'user_register', $this, 'save_user_consent', 5, 1 );
@@ -111,11 +138,10 @@ class Mailmunch_Woocommerce {
     $connected = $this->is_connected();
     $status = array();
     if ( $connected ) {
-      if ( empty( $this->get_webhook_ids() ) && $this->get_sync_token() ) {
-        $this->ensure_webhooks( $this->get_sync_token() );
-      }
-      $this->api->setRequestType( 'get' );
-      $response = $this->api->ping( '/wordpress/woocommerce/status?site_id=' . $this->api->getSiteId() );
+      // NOTE: deliberately no ensure_webhooks() here. Rendering a page is a GET and must not
+      // delete/recreate webhooks as a side effect; use the Repair button below instead.
+      $this->api()->setRequestType( 'get' );
+      $response = $this->api()->ping( '/wordpress/woocommerce/status?site_id=' . $this->api()->getSiteId() );
       if ( ! is_wp_error( $response ) ) {
         $status = json_decode( $response['body'], true );
       }
@@ -133,9 +159,18 @@ class Mailmunch_Woocommerce {
         <?php endif; ?>
         <?php
         $webhook_ids = $this->get_webhook_ids();
-        if ( ! empty( $webhook_ids ) ) :
-          ?>
-          <p><strong>Webhooks:</strong> <?php echo esc_html( count( $webhook_ids ) ); ?> auto-registered (WooCommerce → Settings → Advanced → Webhooks)</p>
+        $expected_webhooks = count( $this->webhook_topics() );
+        ?>
+        <p>
+          <strong>Webhooks:</strong>
+          <?php echo esc_html( count( $webhook_ids ) . ' of ' . $expected_webhooks ); ?>
+          registered (WooCommerce → Settings → Advanced → Webhooks)
+        </p>
+        <?php if ( count( $webhook_ids ) !== $expected_webhooks ) : ?>
+          <p class="notice notice-warning" style="padding:8px 12px;">
+            Some webhooks are missing, so store changes may not reach MailMunch.
+            <button type="button" class="button button-secondary" id="mailmunch-woo-repair">Repair webhooks</button>
+          </p>
         <?php endif; ?>
         <button type="button" class="button button-secondary" id="mailmunch-woo-disconnect">Disconnect</button>
       <?php else : ?>
@@ -180,21 +215,31 @@ class Mailmunch_Woocommerce {
       $('#mailmunch-woo-disconnect').on('click', function() {
         post('mailmunch_woo_disconnect', $(this), 'Disconnecting...');
       });
+      $('#mailmunch-woo-repair').on('click', function() {
+        post('mailmunch_woo_repair_webhooks', $(this), 'Repairing...');
+      });
     });
     </script>
     <?php
   }
 
-  public function ajax_connect() {
+  /**
+   * Shared nonce + capability gate for the settings-page ajax actions.
+   */
+  protected function authorize_admin_ajax_request() {
     if ( ! isset( $_POST['nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['nonce'] ) ), 'mailmunch_woo_sync' ) ) {
       wp_send_json_error( 'Invalid security token. Refresh the page and try again.' );
     }
     if ( ! current_user_can( 'manage_options' ) ) {
       wp_send_json_error( 'Unauthorized' );
     }
+  }
+
+  public function ajax_connect() {
+    $this->authorize_admin_ajax_request();
 
     $connect_params = array(
-      'site_id' => $this->api->getSiteId(),
+      'site_id' => $this->api()->getSiteId(),
       'store_url' => home_url(),
       'store_name' => get_bloginfo( 'name' ),
       'plugin_version' => MAILMUNCH_VERSION,
@@ -205,8 +250,8 @@ class Mailmunch_Woocommerce {
       $connect_params['internal_sync_customer_url'] = $this->sync_customer_inbound_url( 'http://wordpress' );
     }
 
-    $this->api->setRequestType( 'post' );
-    $response = $this->api->ping( '/wordpress/woocommerce/connect', $connect_params );
+    $this->api()->setRequestType( 'post' );
+    $response = $this->api()->ping( '/wordpress/woocommerce/connect', $connect_params );
 
     if ( is_wp_error( $response ) ) {
       wp_send_json_error( $response->get_error_message() );
@@ -218,21 +263,35 @@ class Mailmunch_Woocommerce {
     }
 
     update_option( $this->prefix . 'woo_sync_token', $body['sync_token'] );
-    $this->ensure_webhooks( $body['sync_token'] );
+    // Report a partial webhook set rather than storing it silently — the reloaded page
+    // shows the shortfall and a Repair button.
+    $body['webhooks_complete'] = $this->ensure_webhooks( $body['sync_token'] );
     wp_send_json_success( $body );
   }
 
-  public function ajax_disconnect() {
-    if ( ! isset( $_POST['nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['nonce'] ) ), 'mailmunch_woo_sync' ) ) {
-      wp_send_json_error( 'Invalid security token. Refresh the page and try again.' );
-    }
-    if ( ! current_user_can( 'manage_options' ) ) {
-      wp_send_json_error( 'Unauthorized' );
-    }
+  /**
+   * Explicit, nonce-guarded webhook re-provisioning. Webhooks are never created as a
+   * side effect of rendering the settings page.
+   */
+  public function ajax_repair_webhooks() {
+    $this->authorize_admin_ajax_request();
 
-    $this->api->setRequestType( 'post' );
-    $this->api->ping( '/wordpress/woocommerce/disconnect', array(
-      'site_id' => $this->api->getSiteId(),
+    $token = $this->get_sync_token();
+    if ( empty( $token ) ) {
+      wp_send_json_error( 'Not connected. Connect the store first.' );
+    }
+    if ( ! $this->ensure_webhooks( $token ) ) {
+      wp_send_json_error( 'Some WooCommerce webhooks could not be created. Check the WooCommerce logs and try again.' );
+    }
+    wp_send_json_success();
+  }
+
+  public function ajax_disconnect() {
+    $this->authorize_admin_ajax_request();
+
+    $this->api()->setRequestType( 'post' );
+    $this->api()->ping( '/wordpress/woocommerce/disconnect', array(
+      'site_id' => $this->api()->getSiteId(),
     ) );
     $this->delete_webhooks();
     delete_option( $this->prefix . 'woo_sync_token' );
@@ -240,10 +299,14 @@ class Mailmunch_Woocommerce {
   }
 
   public function render_consent_checkbox() {
+    // Reflect the answer already on file so an existing subscriber is not silently
+    // opted out just by checking out again.
+    $checked = is_user_logged_in() && $this->stored_marketing_consent( get_current_user_id() );
     ?>
     <p class="form-row mailmunch-marketing-consent">
+      <input type="hidden" name="mailmunch_marketing_consent_present" value="1" />
       <label class="woocommerce-form__label woocommerce-form__label-for-checkbox checkbox">
-        <input type="checkbox" class="woocommerce-form__input woocommerce-form__input-checkbox input-checkbox" name="mailmunch_marketing_consent" id="mailmunch_marketing_consent" value="1" />
+        <input type="checkbox" class="woocommerce-form__input woocommerce-form__input-checkbox input-checkbox" name="mailmunch_marketing_consent" value="1" <?php checked( $checked ); ?> />
         <span><?php esc_html_e( 'Subscribe to MailMunch marketing emails', 'mailmunch' ); ?></span>
       </label>
     </p>
@@ -288,9 +351,7 @@ class Mailmunch_Woocommerce {
   }
 
   public function save_user_consent( $user_id ) {
-    $from_admin = isset( $_POST['mailmunch_marketing_consent_present'] );
-    $from_wc = isset( $_POST['mailmunch_marketing_consent'] ) || isset( $_POST['woocommerce_marketing'] );
-    if ( ! $from_admin && ! $from_wc ) {
+    if ( ! $this->consent_field_was_posted() ) {
       return;
     }
     update_user_meta( $user_id, self::CONSENT_META, $this->posted_marketing_consent() ? 'yes' : 'no' );
@@ -301,13 +362,42 @@ class Mailmunch_Woocommerce {
     if ( ! $order ) {
       return;
     }
+
+    $user_id = $order->get_customer_id();
+
+    // The consent checkbox only renders on the *classic* checkout
+    // (woocommerce_review_order_before_submit). The block checkout — the WooCommerce
+    // default since 8.3 — still fires this hook but never renders the field, and an
+    // unticked checkbox is simply absent from $_POST. Writing the posted value
+    // unconditionally would therefore revoke consent on every order. Only record a
+    // decision when the customer was actually shown the field.
+    if ( ! $this->consent_field_was_posted() ) {
+      // Carry the account-level answer onto the order for reporting, but change nothing.
+      if ( $user_id > 0 && ! $order->meta_exists( self::CONSENT_META ) ) {
+        $order->update_meta_data( self::CONSENT_META, $this->stored_marketing_consent( $user_id ) ? 'yes' : 'no' );
+        $order->save();
+      }
+      return;
+    }
+
     $consent = $this->posted_marketing_consent() ? 'yes' : 'no';
     $order->update_meta_data( self::CONSENT_META, $consent );
     $order->save();
-    $user_id = $order->get_customer_id();
     if ( $user_id > 0 ) {
       update_user_meta( $user_id, self::CONSENT_META, $consent );
     }
+  }
+
+  /**
+   * True when the request actually carried a MailMunch consent field, i.e. the customer
+   * was shown the checkbox and their answer is meaningful. An unticked checkbox posts
+   * nothing, so the hidden "_present" marker is what distinguishes "said no" from
+   * "was never asked".
+   */
+  protected function consent_field_was_posted() {
+    return isset( $_POST['mailmunch_marketing_consent_present'] )
+      || isset( $_POST['mailmunch_marketing_consent'] )
+      || isset( $_POST['woocommerce_marketing'] );
   }
 
   public function register_rest_routes() {
@@ -351,10 +441,9 @@ class Mailmunch_Woocommerce {
       return sanitize_text_field( wp_unslash( $_SERVER['HTTP_X_MAILMUNCH_SYNC_TOKEN'] ) );
     }
 
-    if ( ! empty( $_GET['sync_token'] ) ) {
-      return sanitize_text_field( wp_unslash( $_GET['sync_token'] ) );
-    }
-
+    // Deliberately no $_GET fallback: this token authorises an unauthenticated endpoint
+    // that creates WordPress users, and query strings leak into access logs, proxy logs
+    // and Referer headers. Header-only.
     return '';
   }
 
@@ -373,11 +462,6 @@ class Mailmunch_Woocommerce {
       $auth = $request->get_header( 'authorization' );
       if ( $auth && stripos( $auth, 'Bearer ' ) === 0 ) {
         return trim( substr( $auth, 7 ) );
-      }
-
-      $param_token = $request->get_param( 'sync_token' );
-      if ( ! empty( $param_token ) ) {
-        return trim( (string) $param_token );
       }
     }
 
@@ -457,15 +541,30 @@ class Mailmunch_Woocommerce {
     }
   }
 
+  /**
+   * Idempotency wrapper. The key is only burned once the sync has actually succeeded —
+   * marking it up front would turn a transient failure (invalid email, wc_create_new_customer
+   * error, fatal) into a permanent one, because MailMunch's retry would be answered with
+   * "duplicate, all good" and the customer would never be created.
+   */
   protected function process_inbound_customer_sync_payload( $payload, $idempotency_key = null ) {
-    $payload = is_array( $payload ) ? $payload : array();
-    if ( $idempotency_key ) {
-      $cache_key = 'mailmunch_wc_idem_' . md5( $idempotency_key );
-      if ( get_transient( $cache_key ) ) {
-        return array( 'success' => true, 'duplicate' => true );
-      }
+    $cache_key = $idempotency_key ? 'mailmunch_wc_idem_' . md5( $idempotency_key ) : '';
+
+    if ( $cache_key && get_transient( $cache_key ) ) {
+      return array( 'success' => true, 'duplicate' => true );
+    }
+
+    $result = $this->run_inbound_customer_sync( $payload );
+
+    if ( $cache_key && ! is_wp_error( $result ) ) {
       set_transient( $cache_key, 1, DAY_IN_SECONDS );
     }
+
+    return $result;
+  }
+
+  protected function run_inbound_customer_sync( $payload ) {
+    $payload = is_array( $payload ) ? $payload : array();
 
     $email = sanitize_email( $payload['email'] ?? '' );
     if ( empty( $email ) ) {
@@ -477,6 +576,17 @@ class Mailmunch_Woocommerce {
     $marketing_consent = ! empty( $payload['marketing_consent'] );
     $user = get_user_by( 'email', $email );
     $customer_id = $user ? $user->ID : 0;
+
+    // get_user_by() matches *any* WordPress user, not just shoppers. The store owner is
+    // almost always on their own MailMunch list, and we must not rewrite an
+    // administrator's name and billing address with list data.
+    if ( $customer_id && ! $this->is_woocommerce_customer( $customer_id ) ) {
+      return array(
+        'success' => true,
+        'noop' => true,
+        'message' => 'Email belongs to a non-customer WordPress user — left untouched',
+      );
+    }
 
     if ( ! $customer_id ) {
       $guest_orders = wc_get_orders( array(
@@ -492,15 +602,24 @@ class Mailmunch_Woocommerce {
         );
       }
 
-      $customer_id = wc_create_new_customer(
-        $email,
-        '',
-        wp_generate_password( 12, true ),
-        array(
-          'first_name' => sanitize_text_field( $customer_data['first_name'] ?? '' ),
-          'last_name' => sanitize_text_field( $customer_data['last_name'] ?? '' ),
-        )
-      );
+      // wc_create_new_customer() fires woocommerce_created_customer, which WooCommerce
+      // wires to the "Your account has been created" transactional email. Syncing a
+      // MailMunch list must not mail every contact an account notice for a store they
+      // never signed up to, so suppress that one email for the duration of the call.
+      add_filter( 'woocommerce_email_enabled_customer_new_account', '__return_false', 99 );
+      try {
+        $customer_id = wc_create_new_customer(
+          $email,
+          '',
+          wp_generate_password( 12, true ),
+          array(
+            'first_name' => sanitize_text_field( $customer_data['first_name'] ?? '' ),
+            'last_name' => sanitize_text_field( $customer_data['last_name'] ?? '' ),
+          )
+        );
+      } finally {
+        remove_filter( 'woocommerce_email_enabled_customer_new_account', '__return_false', 99 );
+      }
 
       if ( is_wp_error( $customer_id ) ) {
         return new WP_Error( 'create_failed', $customer_id->get_error_message(), array( 'status' => 422 ) );
@@ -561,7 +680,7 @@ class Mailmunch_Woocommerce {
     }
 
     $this->deleted_customer_snapshots[ $user_id ] = $payload;
-    set_transient( $this->prefix . 'deleted_customer_' . $user_id, $payload, HOUR_IN_SECONDS );
+    set_transient( $this->prefix . 'deleted_customer_' . $user_id, $payload, self::SNAPSHOT_TTL );
   }
 
   /**
@@ -611,7 +730,7 @@ class Mailmunch_Woocommerce {
     $id = (int) $order->get_id();
     $payload = $this->build_order_ingest_payload( $order );
     $this->deleted_order_snapshots[ $id ] = $payload;
-    set_transient( $this->prefix . 'deleted_order_' . $id, $payload, HOUR_IN_SECONDS );
+    set_transient( $this->prefix . 'deleted_order_' . $id, $payload, self::SNAPSHOT_TTL );
   }
 
   /**
@@ -780,7 +899,7 @@ class Mailmunch_Woocommerce {
     }
 
     return array(
-      'event_id' => wp_generate_uuid4(),
+      'event_id' => '',
       'updated_at' => $timestamp,
       'customer' => array(
         'id' => $customer->get_id(),
@@ -807,7 +926,7 @@ class Mailmunch_Woocommerce {
   protected function build_guest_order_payload( $order ) {
     $billing_email = strtolower( (string) $order->get_billing_email() );
     return array(
-      'event_id' => wp_generate_uuid4(),
+      'event_id' => '',
       'updated_at' => gmdate( 'c' ),
       'customer' => array(
         'id' => null,
@@ -832,44 +951,67 @@ class Mailmunch_Woocommerce {
   }
 
   /**
-   * Auto-create WooCommerce webhooks on Connect so admins don't add them manually.
-   * Valid WC topics only: customer.created/updated/deleted, order.created/updated/deleted/restored.
+   * The WooCommerce topics MailMunch subscribes to. order.deleted / order.restored are
+   * required: cache_order_before_delete() and the order.deleted branches of
+   * filter_webhook_should_deliver() / filter_webhook_payload() exist solely to serve them,
+   * and without them a deleted order is never reported to MailMunch.
    */
-  protected function ensure_webhooks( $sync_token ) {
-    if ( ! class_exists( 'WC_Webhook' ) ) {
-      return;
-    }
-
-    $this->delete_webhooks();
-
-    $delivery_url = MAILMUNCH_WEBHOOKS_URL;
-    $topics = array(
+  protected function webhook_topics() {
+    return array(
       'customer.created' => 'MailMunch — Customer created',
       'customer.updated' => 'MailMunch — Customer updated',
       'customer.deleted' => 'MailMunch — Customer deleted',
       'order.created' => 'MailMunch — Order created',
       'order.updated' => 'MailMunch — Order updated',
+      'order.deleted' => 'MailMunch — Order deleted',
+      'order.restored' => 'MailMunch — Order restored',
     );
+  }
+
+  /**
+   * Auto-create WooCommerce webhooks on Connect so admins don't add them manually.
+   *
+   * @return bool True when every topic was registered.
+   */
+  protected function ensure_webhooks( $sync_token ) {
+    if ( ! class_exists( 'WC_Webhook' ) ) {
+      return false;
+    }
+
+    $this->delete_webhooks();
+
+    $delivery_url = MAILMUNCH_WEBHOOKS_URL;
+    $topics = $this->webhook_topics();
 
     $ids = array();
     foreach ( $topics as $topic => $name ) {
-      $webhook = new WC_Webhook();
-      $webhook->set_name( $name );
-      $webhook->set_user_id( get_current_user_id() );
-      $webhook->set_topic( $topic );
-      $webhook->set_delivery_url( $delivery_url );
-      $webhook->set_secret( $sync_token );
-      $webhook->set_status( 'active' );
-      if ( method_exists( $webhook, 'set_api_version' ) ) {
-        $webhook->set_api_version( 'wp_api_v2' );
+      try {
+        $webhook = new WC_Webhook();
+        $webhook->set_name( $name );
+        $webhook->set_user_id( get_current_user_id() );
+        $webhook->set_topic( $topic );
+        $webhook->set_delivery_url( $delivery_url );
+        $webhook->set_secret( $sync_token );
+        $webhook->set_status( 'active' );
+        if ( method_exists( $webhook, 'set_api_version' ) ) {
+          $webhook->set_api_version( 'wp_api_v2' );
+        }
+        $id = $webhook->save();
+      } catch ( Exception $e ) {
+        $id = 0;
       }
-      $id = $webhook->save();
+
       if ( $id ) {
         $ids[] = (int) $id;
       }
     }
 
+    // Persist whatever was created so a partial set can still be cleaned up on
+    // disconnect, and report the shortfall so the caller can surface a Repair action
+    // instead of silently leaving the store half-wired.
     update_option( $this->prefix . 'woo_webhook_ids', $ids );
+
+    return count( $ids ) === count( $topics );
   }
 
   protected function delete_webhooks() {
@@ -972,10 +1114,58 @@ class Mailmunch_Woocommerce {
     }
 
     if ( ! is_array( $mailmunch_payload ) ) {
-      return $payload;
+      // Never fall through to WooCommerce's native body: it would still be delivered to
+      // MAILMUNCH_WEBHOOKS_URL with our Authorization and event-type headers, but in a
+      // shape the Lambda does not understand and with no Idempotency-Key. Send a
+      // well-formed "resource unavailable" event instead so ingest can log and drop it.
+      return array(
+        'event_id' => $this->event_id_for( $topic, $resource_id, 'unavailable' ),
+        'updated_at' => gmdate( 'c' ),
+        'topic' => $topic,
+        'resource' => $resource,
+        'resource_id' => (int) $resource_id,
+        'unavailable' => true,
+      );
     }
 
+    $mailmunch_payload['event_id'] = $this->event_id_for( $topic, $resource_id, $mailmunch_payload );
+
     return $mailmunch_payload;
+  }
+
+  /**
+   * Deterministic, content-addressed event id.
+   *
+   * A random uuid per payload build deduplicates nothing: WooCommerce binds
+   * customer.created to both user_register and woocommerce_created_customer, so a single
+   * signup delivers the same event twice, and with a fresh uuid each time MailMunch
+   * processes it twice. Hashing the payload content instead means identical states
+   * collapse to one Idempotency-Key while genuine changes still produce a new one.
+   *
+   * updated_at is excluded because it is deliberately "now" on every build.
+   *
+   * @param string       $topic       WooCommerce webhook topic.
+   * @param int          $resource_id Customer or order id.
+   * @param array|string $content     Payload to fingerprint, or a marker string.
+   */
+  protected function event_id_for( $topic, $resource_id, $content ) {
+    if ( is_array( $content ) ) {
+      unset( $content['event_id'], $content['updated_at'] );
+      $content = wp_json_encode( $content );
+    }
+
+    $hash = md5( $topic . '|' . (int) $resource_id . '|' . (string) $content );
+
+    // Keep the UUID shape the ingest side already receives — only the derivation changes.
+    return sprintf(
+      '%s-%s-4%s-%s%s-%s',
+      substr( $hash, 0, 8 ),
+      substr( $hash, 8, 4 ),
+      substr( $hash, 13, 3 ),
+      dechex( hexdec( substr( $hash, 16, 1 ) ) & 0x3 | 0x8 ),
+      substr( $hash, 17, 3 ),
+      substr( $hash, 20, 12 )
+    );
   }
 
   /**
@@ -997,7 +1187,9 @@ class Mailmunch_Woocommerce {
     $http_args['headers']['Authorization'] = 'Bearer ' . $token;
     $http_args['headers']['Content-Type'] = 'application/json';
     $http_args['headers']['X-Mailmunch-Event-Type'] = $topic;
-    $http_args['headers']['X-Mailmunch-Site-Id'] = (string) $this->api->getSiteId();
+    // Read the option directly — this runs on every webhook delivery, and constructing
+    // Mailmunch_Api here would add a blocking remote call to each one.
+    $http_args['headers']['X-Mailmunch-Site-Id'] = (string) $this->get_site_id();
     $http_args['timeout'] = 15;
 
     $body = json_decode( $http_args['body'] ?? '', true );

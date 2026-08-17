@@ -24,7 +24,7 @@ define( 'MAILMUNCH_SLUG', "mailmunch" );
 define( 'MAILMUNCH_PREFIX', 'mailmunch' );
 define( 'MAILMUNCH_POST_TYPE', 'mailmunch_page' );
 define( 'MAILMUNCH_PLUGIN_DIRECTORY', 'mailmunch' );
-define( 'MAILMUNCH_VERSION', '3.2.3' );
+define( 'MAILMUNCH_VERSION', '3.2.4' );
 
 /**
  * The core plugin class.
@@ -254,8 +254,10 @@ class Mailmunch {
 
 		require_once plugin_dir_path( dirname( __FILE__ ) ) . 'includes/woocommerce/class-mailmunch-woocommerce.php';
 
-		$api = new Mailmunch_Api();
-		$woocommerce = new Mailmunch_Woocommerce( $this->get_plugin_name(), $api );
+		// NOTE: no Mailmunch_Api here. Its constructor performs blocking remote calls
+		// (ensureUser / findOrCreateSite, 120s timeout) and this runs on every request.
+		// Mailmunch_Woocommerce builds it lazily, only on the paths that actually talk to the API.
+		$woocommerce = new Mailmunch_Woocommerce( $this->get_plugin_name() );
 		$woocommerce->register_hooks( $this->loader );
 	}
 
