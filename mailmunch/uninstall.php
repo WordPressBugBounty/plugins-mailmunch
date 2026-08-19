@@ -35,3 +35,6 @@ delete_option('mailmunch_site_id');
 delete_option('mailmunch_activation_redirect');
 delete_option('mailmunch_activation_date');
 delete_option('mailmunch_dismiss_review_notice');
+delete_option('mailmunch_woo_consent_placement');
+delete_option('mailmunch_woo_consent_show_on_registration');
+delete_option('mailmunch_woo_consent_default_checked');

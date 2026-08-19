@@ -2,6 +2,7 @@
 
 class Mailmunch_Woocommerce {
   const CONSENT_META = '_mailmunch_marketing_consent';
+  const CONSENT_PLACEMENT_DEFAULT = 'woocommerce_review_order_before_submit';
 
   protected $api;
   protected $plugin_name;
@@ -60,8 +61,10 @@ class Mailmunch_Woocommerce {
     $loader->add_action( 'edit_user_profile_update', $this, 'save_user_consent', 5, 1 );
     $loader->add_action( 'personal_options_update', $this, 'save_user_consent', 5, 1 );
     $loader->add_action( 'woocommerce_checkout_update_order_meta', $this, 'save_checkout_consent', 5, 2 );
-    $loader->add_action( 'woocommerce_register_form', $this, 'render_consent_checkbox' );
-    $loader->add_action( 'woocommerce_review_order_before_submit', $this, 'render_consent_checkbox' );
+    $loader->add_action( $this->get_consent_placement(), $this, 'render_consent_checkbox' );
+    if ( $this->show_consent_on_registration() ) {
+      $loader->add_action( 'woocommerce_register_form', $this, 'render_consent_checkbox' );
+    }
     $loader->add_action( 'rest_api_init', $this, 'register_rest_routes' );
     $loader->add_action( 'user_new_form', $this, 'render_admin_user_consent', 10, 1 );
     $loader->add_action( 'edit_user_profile', $this, 'render_admin_user_consent_profile', 10, 1 );
@@ -135,6 +138,7 @@ class Mailmunch_Woocommerce {
   }
 
   public function render_page() {
+    $consent_saved = $this->save_consent_settings();
     $connected = $this->is_connected();
     $status = array();
     if ( $connected ) {
@@ -177,6 +181,8 @@ class Mailmunch_Woocommerce {
         <p>Connect your WooCommerce store to sync customers with MailMunch.</p>
         <button type="button" class="button button-primary" id="mailmunch-woo-connect">Connect Store</button>
       <?php endif; ?>
+
+      <?php $this->render_consent_settings( $consent_saved ); ?>
     </div>
     <script>
     jQuery(function($) {
@@ -298,10 +304,137 @@ class Mailmunch_Woocommerce {
     wp_send_json_success();
   }
 
+  /**
+   * Allowed classic-checkout hooks for the marketing consent checkbox.
+   *
+   * @return array<string,string> hook => label
+   */
+  protected function consent_placement_hooks() {
+    return array(
+      'woocommerce_review_order_before_submit' => __( 'Before Complete Order button', 'mailmunch' ),
+      'woocommerce_review_order_after_submit' => __( 'After Complete Order button', 'mailmunch' ),
+      'woocommerce_after_checkout_billing_form' => __( 'After billing details', 'mailmunch' ),
+      'woocommerce_after_checkout_shipping_form' => __( 'After shipping details', 'mailmunch' ),
+      'woocommerce_after_order_notes' => __( 'After order notes', 'mailmunch' ),
+      'woocommerce_checkout_before_terms_and_conditions' => __( 'Before terms and conditions', 'mailmunch' ),
+      'woocommerce_checkout_after_terms_and_conditions' => __( 'After terms and conditions', 'mailmunch' ),
+    );
+  }
+
+  protected function get_consent_placement() {
+    $placement = get_option( $this->prefix . 'woo_consent_placement', self::CONSENT_PLACEMENT_DEFAULT );
+    if ( ! array_key_exists( $placement, $this->consent_placement_hooks() ) ) {
+      return self::CONSENT_PLACEMENT_DEFAULT;
+    }
+    return $placement;
+  }
+
+  protected function show_consent_on_registration() {
+    return get_option( $this->prefix . 'woo_consent_show_on_registration', 'yes' ) !== 'no';
+  }
+
+  protected function consent_default_checked() {
+    return get_option( $this->prefix . 'woo_consent_default_checked', 'no' ) === 'yes';
+  }
+
+  /**
+   * Checked state for the storefront checkbox: stored answer wins when present,
+   * otherwise the default-checked setting (unchecked unless the merchant opted in).
+   */
+  protected function consent_checkbox_should_be_checked() {
+    if ( is_user_logged_in() ) {
+      $meta = get_user_meta( get_current_user_id(), self::CONSENT_META, true );
+      if ( $meta === 'yes' || $meta === 'no' ) {
+        return $meta === 'yes';
+      }
+    }
+    return $this->consent_default_checked();
+  }
+
+  /**
+   * Persist consent checkbox settings from the WooCommerce Sync page.
+   *
+   * @return bool True when a valid settings POST was saved.
+   */
+  protected function save_consent_settings() {
+    if ( ! isset( $_POST['mailmunch_woo_consent_nonce'] )
+      || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['mailmunch_woo_consent_nonce'] ) ), 'mailmunch_woo_consent_settings' )
+      || ! current_user_can( 'manage_options' ) ) {
+      return false;
+    }
+
+    $placement = isset( $_POST['woo_consent_placement'] ) ? sanitize_text_field( wp_unslash( $_POST['woo_consent_placement'] ) ) : '';
+    if ( ! array_key_exists( $placement, $this->consent_placement_hooks() ) ) {
+      $placement = self::CONSENT_PLACEMENT_DEFAULT;
+    }
+    update_option( $this->prefix . 'woo_consent_placement', $placement );
+
+    $show_on_registration = ( isset( $_POST['woo_consent_show_on_registration'] ) && sanitize_text_field( wp_unslash( $_POST['woo_consent_show_on_registration'] ) ) === 'yes' ) ? 'yes' : 'no';
+    update_option( $this->prefix . 'woo_consent_show_on_registration', $show_on_registration );
+
+    $default_checked = ( isset( $_POST['woo_consent_default_checked'] ) && sanitize_text_field( wp_unslash( $_POST['woo_consent_default_checked'] ) ) === 'yes' ) ? 'yes' : 'no';
+    update_option( $this->prefix . 'woo_consent_default_checked', $default_checked );
+
+    return true;
+  }
+
+  protected function render_consent_settings( $saved ) {
+    $placement = $this->get_consent_placement();
+    $show_on_registration = $this->show_consent_on_registration() ? 'yes' : 'no';
+    $default_checked = $this->consent_default_checked() ? 'yes' : 'no';
+    ?>
+      <?php if ( $saved ) : ?>
+        <div class="notice notice-success is-dismissible"><p><?php esc_html_e( 'Marketing consent settings saved.', 'mailmunch' ); ?></p></div>
+      <?php endif; ?>
+      <h2><?php esc_html_e( 'Marketing consent', 'mailmunch' ); ?></h2>
+      <p><?php esc_html_e( 'These options apply to the classic WooCommerce checkout. The Checkout block does not support custom checkbox placement.', 'mailmunch' ); ?></p>
+      <form method="post">
+        <?php wp_nonce_field( 'mailmunch_woo_consent_settings', 'mailmunch_woo_consent_nonce' ); ?>
+        <table class="form-table" role="presentation">
+          <tr>
+            <th scope="row">
+              <label for="woo_consent_placement"><?php esc_html_e( 'Checkout placement', 'mailmunch' ); ?></label>
+            </th>
+            <td>
+              <select name="woo_consent_placement" id="woo_consent_placement">
+                <?php foreach ( $this->consent_placement_hooks() as $hook => $label ) : ?>
+                  <option value="<?php echo esc_attr( $hook ); ?>" <?php selected( $placement, $hook ); ?>><?php echo esc_html( $label ); ?></option>
+                <?php endforeach; ?>
+              </select>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">
+              <label for="woo_consent_show_on_registration"><?php esc_html_e( 'Show on registration form', 'mailmunch' ); ?></label>
+            </th>
+            <td>
+              <select name="woo_consent_show_on_registration" id="woo_consent_show_on_registration">
+                <option value="yes" <?php selected( $show_on_registration, 'yes' ); ?>><?php esc_html_e( 'Yes', 'mailmunch' ); ?></option>
+                <option value="no" <?php selected( $show_on_registration, 'no' ); ?>><?php esc_html_e( 'No', 'mailmunch' ); ?></option>
+              </select>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">
+              <label for="woo_consent_default_checked"><?php esc_html_e( 'Default checkbox state', 'mailmunch' ); ?></label>
+            </th>
+            <td>
+              <select name="woo_consent_default_checked" id="woo_consent_default_checked">
+                <option value="no" <?php selected( $default_checked, 'no' ); ?>><?php esc_html_e( 'Unchecked', 'mailmunch' ); ?></option>
+                <option value="yes" <?php selected( $default_checked, 'yes' ); ?>><?php esc_html_e( 'Checked', 'mailmunch' ); ?></option>
+              </select>
+            </td>
+          </tr>
+        </table>
+        <?php submit_button( __( 'Save consent settings', 'mailmunch' ) ); ?>
+      </form>
+    <?php
+  }
+
   public function render_consent_checkbox() {
-    // Reflect the answer already on file so an existing subscriber is not silently
-    // opted out just by checking out again.
-    $checked = is_user_logged_in() && $this->stored_marketing_consent( get_current_user_id() );
+    // Stored consent wins so an existing subscriber is not silently opted out,
+    // and someone who already declined is not re-opted by the default-checked setting.
+    $checked = $this->consent_checkbox_should_be_checked();
     ?>
     <p class="form-row mailmunch-marketing-consent">
       <input type="hidden" name="mailmunch_marketing_consent_present" value="1" />
@@ -365,12 +498,12 @@ class Mailmunch_Woocommerce {
 
     $user_id = $order->get_customer_id();
 
-    // The consent checkbox only renders on the *classic* checkout
-    // (woocommerce_review_order_before_submit). The block checkout — the WooCommerce
-    // default since 8.3 — still fires this hook but never renders the field, and an
-    // unticked checkbox is simply absent from $_POST. Writing the posted value
-    // unconditionally would therefore revoke consent on every order. Only record a
-    // decision when the customer was actually shown the field.
+    // The consent checkbox only renders on the *classic* checkout (placement is
+    // configurable). The block checkout — the WooCommerce default since 8.3 —
+    // still fires this hook but never renders the field, and an unticked checkbox
+    // is simply absent from $_POST. Writing the posted value unconditionally
+    // would therefore revoke consent on every order. Only record a decision when
+    // the customer was actually shown the field.
     if ( ! $this->consent_field_was_posted() ) {
       // Carry the account-level answer onto the order for reporting, but change nothing.
       if ( $user_id > 0 && ! $order->meta_exists( self::CONSENT_META ) ) {

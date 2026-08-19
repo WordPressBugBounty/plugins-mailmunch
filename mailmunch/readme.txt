@@ -3,7 +3,7 @@ Contributors: mailmunch, lizgannes
 Tags: signup form, newsletter, newsletters, subscribe, popup, exit popup, exit intent, subscribers, subscription, popover, lightbox, analytics, collect email, optin, optin form, optin forms, double optin, list builder, email form, lead, leads, mailchimp, mailchimp form, mailchimp newsletter, mailchimp plugin, mailchimp signup, mailchimp signup forms, mailchimp signup form, mailchimp widget, mailchimp subscribe, constant contact, contact contact form, constant contact newsletter, constant contact plugin, constant contact signup, constant contact signup forms, constant contact signup form, constant contact widget, constant contact subscribe, aweber, aweber form, aweber forms, aweber signup form, aweber plugin
 Requires at least: 3.0.1
 Tested up to: 7.0
-Stable tag: 3.2.4
+Stable tag: 3.2.5
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -162,6 +162,11 @@ Why people use AWeber
 7. Another example from a user site
 
 == Changelog ==
+
+= 3.2.5 - Aug 18, 2026 =
+* WooCommerce: selectable checkout placement for the marketing consent checkbox
+* WooCommerce: setting for the consent checkbox default state (unchecked by default)
+* WooCommerce: option to show or hide the consent checkbox on the registration form
 
 = 3.2.2 - Jul 1, 2026 =
 * Security: Require manage_options capability and nonce verification for sign_in and sign_up AJAX actions (CVE-2026-7520)
