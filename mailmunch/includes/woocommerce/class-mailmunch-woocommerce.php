@@ -539,6 +539,341 @@ class Mailmunch_Woocommerce {
       'callback' => array( $this, 'sync_customer' ),
       'permission_callback' => array( $this, 'authorize_rest_request' ),
     ) );
+
+    register_rest_route( 'mailmunch/v1', '/products', array(
+      'methods' => 'GET',
+      'callback' => array( $this, 'get_products' ),
+      'permission_callback' => array( $this, 'authorize_rest_request' ),
+      'args' => array(
+        'search' => array(
+          'type' => 'string',
+          'required' => false,
+          'sanitize_callback' => 'sanitize_text_field',
+        ),
+        'page' => array(
+          'type' => 'integer',
+          'default' => 1,
+          'minimum' => 1,
+          'sanitize_callback' => 'absint',
+        ),
+        'per_page' => array(
+          'type' => 'integer',
+          'default' => 30,
+          'minimum' => 1,
+          'maximum' => 100,
+          'sanitize_callback' => 'absint',
+        ),
+      ),
+    ) );
+
+    register_rest_route( 'mailmunch/v1', '/products/(?P<id>\d+)', array(
+      'methods' => 'GET',
+      'callback' => array( $this, 'get_product' ),
+      'permission_callback' => array( $this, 'authorize_rest_request' ),
+      'args' => array(
+        'id' => array(
+          'type' => 'integer',
+          'required' => true,
+          'sanitize_callback' => 'absint',
+        ),
+      ),
+    ) );
+  }
+
+  /**
+   * List published WooCommerce products for MailMunch builders.
+   */
+  public function get_products( WP_REST_Request $request ) {
+    if ( ! function_exists( 'wc_get_products' ) ) {
+      return new WP_Error(
+        'mailmunch_woocommerce_unavailable',
+        __( 'WooCommerce is not available on this store.', 'mailmunch' ),
+        array( 'status' => 503 )
+      );
+    }
+
+    $page = max( 1, (int) $request->get_param( 'page' ) );
+    $per_page = min( 100, max( 1, (int) $request->get_param( 'per_page' ) ) );
+    $search = trim( (string) $request->get_param( 'search' ) );
+
+    if ( $search !== '' ) {
+      return rest_ensure_response( $this->search_products_for_mailmunch( $search, $page, $per_page ) );
+    }
+
+    $results = wc_get_products( $this->get_mailmunch_products_query_args( $page, $per_page ) );
+    $products = array();
+
+    if ( ! empty( $results->products ) && is_array( $results->products ) ) {
+      foreach ( $results->products as $product ) {
+        $product = $this->resolve_mailmunch_product( $product );
+        if ( ! $this->is_product_available_for_mailmunch( $product ) ) {
+          continue;
+        }
+        $products[] = $this->format_product_for_mailmunch( $product );
+      }
+    }
+
+    $max_pages = isset( $results->max_num_pages ) ? (int) $results->max_num_pages : 0;
+
+    return rest_ensure_response( array(
+      'pageInfo' => array(
+        'hasNextPage' => $page < $max_pages,
+        'currentPage' => $page,
+      ),
+      'products' => $products,
+    ) );
+  }
+
+  /**
+   * Search published parent products by title and SKU.
+   */
+  protected function search_products_for_mailmunch( $search, $page, $per_page ) {
+    $data_store = WC_Data_Store::load( 'product' );
+    $product_ids = $data_store->search_products( $search, '', true, false );
+
+    $matched_products = array();
+    foreach ( (array) $product_ids as $product_id ) {
+      $product = $this->resolve_mailmunch_product( wc_get_product( (int) $product_id ) );
+      if ( ! $this->is_product_available_for_mailmunch( $product ) ) {
+        continue;
+      }
+      $matched_products[ $product->get_id() ] = $product;
+    }
+
+    $matched_products = array_values( $matched_products );
+    $total = count( $matched_products );
+    $offset = ( $page - 1 ) * $per_page;
+    $page_products = array_slice( $matched_products, $offset, $per_page );
+
+    $products = array();
+    foreach ( $page_products as $product ) {
+      $products[] = $this->format_product_for_mailmunch( $product );
+    }
+
+    $max_pages = $per_page > 0 ? (int) ceil( $total / $per_page ) : 0;
+
+    return array(
+      'pageInfo' => array(
+        'hasNextPage' => $page < $max_pages,
+        'currentPage' => $page,
+      ),
+      'products' => $products,
+    );
+  }
+
+  /**
+   * Fetch a single WooCommerce product by ID.
+   */
+  public function get_product( WP_REST_Request $request ) {
+    if ( ! function_exists( 'wc_get_product' ) ) {
+      return new WP_Error(
+        'mailmunch_woocommerce_unavailable',
+        __( 'WooCommerce is not available on this store.', 'mailmunch' ),
+        array( 'status' => 503 )
+      );
+    }
+
+    $product = $this->resolve_mailmunch_product( wc_get_product( (int) $request->get_param( 'id' ) ) );
+    if ( ! $this->is_product_available_for_mailmunch( $product ) ) {
+      return new WP_Error(
+        'mailmunch_product_not_found',
+        __( 'Product not found.', 'mailmunch' ),
+        array( 'status' => 404 )
+      );
+    }
+
+    return rest_ensure_response( $this->format_product_for_mailmunch( $product ) );
+  }
+
+  /**
+   * Parent product types exposed in MailMunch builder pickers (excludes variations).
+   */
+  protected function get_mailmunch_product_types() {
+    return array( 'simple', 'variable', 'grouped', 'external' );
+  }
+
+  /**
+   * Resolve variation hits to their parent product for builder display.
+   */
+  protected function resolve_mailmunch_product( $product ) {
+    if ( ! $product instanceof WC_Product ) {
+      return null;
+    }
+
+    if ( $product->is_type( 'variation' ) ) {
+      $product = wc_get_product( $product->get_parent_id() );
+    }
+
+    if ( ! $product instanceof WC_Product ) {
+      return null;
+    }
+
+    return $product;
+  }
+
+  /**
+   * Base wc_get_products args for MailMunch builder product lists.
+   */
+  protected function get_mailmunch_products_query_args( $page, $per_page ) {
+    return array(
+      'status' => 'publish',
+      'type' => $this->get_mailmunch_product_types(),
+      'visibility' => 'visible',
+      'limit' => $per_page,
+      'page' => $page,
+      'paginate' => true,
+      'return' => 'objects',
+      'orderby' => 'title',
+      'order' => 'ASC',
+    );
+  }
+
+  /**
+   * Whether a product should appear in MailMunch builder pickers and detail fetches.
+   */
+  protected function is_product_available_for_mailmunch( $product ) {
+    if ( ! $product instanceof WC_Product ) {
+      return false;
+    }
+
+    return in_array( $product->get_type(), $this->get_mailmunch_product_types(), true )
+      && 'publish' === $product->get_status()
+      && $product->is_visible();
+  }
+
+  /**
+   * Build builder pricing for simple, variable, grouped, and external products.
+   */
+  protected function get_product_pricing_for_mailmunch( WC_Product $product ) {
+    $pricing = array(
+      'price' => '',
+      'oldPrice' => '',
+      'currencySymbol' => $this->get_product_currency_symbol(),
+    );
+
+    if ( $product->is_type( 'variable' ) ) {
+      $regular_price = $product->get_variation_regular_price( 'min', true );
+      $sale_price = $product->get_variation_sale_price( 'min', true );
+      $min_price = $product->get_variation_price( 'min', true );
+      $max_price = $product->get_variation_price( 'max', true );
+
+      if ( $sale_price !== '' && $regular_price !== '' && (float) $sale_price < (float) $regular_price ) {
+        $pricing['price'] = $this->format_product_price( $sale_price );
+        $pricing['oldPrice'] = $this->format_product_price( $regular_price );
+        return $pricing;
+      }
+
+      if ( $min_price !== '' && $max_price !== '' && (float) $min_price !== (float) $max_price ) {
+        $pricing['price'] = $this->format_product_price( $min_price ) . ' - ' . $this->format_product_price( $max_price );
+        return $pricing;
+      }
+
+      $pricing['price'] = $this->format_product_price( $min_price );
+      return $pricing;
+    }
+
+    if ( $product->is_type( 'grouped' ) ) {
+      $child_prices = array();
+
+      foreach ( (array) $product->get_children() as $child_id ) {
+        $child = wc_get_product( (int) $child_id );
+        if ( ! $child instanceof WC_Product || ! $child->is_purchasable() ) {
+          continue;
+        }
+
+        $child_price = $child->get_price();
+        if ( $child_price !== '' && $child_price !== null ) {
+          $child_prices[] = (float) $child_price;
+        }
+      }
+
+      if ( ! empty( $child_prices ) ) {
+        $pricing['price'] = $this->format_product_price( min( $child_prices ) );
+      }
+
+      return $pricing;
+    }
+
+    $regular_price = $product->get_regular_price();
+    $sale_price = $product->get_sale_price();
+    $current_price = $product->get_price();
+    $pricing['price'] = $this->format_product_price( $current_price );
+
+    if ( $product->is_on_sale() && $sale_price !== '' && $regular_price !== '' ) {
+      $pricing['price'] = $this->format_product_price( $sale_price );
+      $pricing['oldPrice'] = $this->format_product_price( $regular_price );
+    }
+
+    return $pricing;
+  }
+
+  /**
+   * Normalize a WooCommerce product for MailMunch builders.
+   */
+  protected function format_product_for_mailmunch( WC_Product $product ) {
+    $description = $product->get_short_description();
+    if ( $description === '' ) {
+      $description = $product->get_description();
+    }
+
+    $description = $this->get_product_excerpt( $description, 200 );
+
+    $image_id = $product->get_image_id();
+    $image = $image_id ? wp_get_attachment_image_url( $image_id, 'full' ) : '';
+    $pricing = $this->get_product_pricing_for_mailmunch( $product );
+
+    return array(
+      'id' => (string) $product->get_id(),
+      'title' => $product->get_name(),
+      'description' => $description,
+      'image' => $image ? $image : '',
+      'pricing' => $pricing,
+      'link' => $product->get_permalink(),
+    );
+  }
+
+  /**
+   * Truncate product description for builder payloads (matches Shopify excerpt length).
+   */
+  protected function get_product_excerpt( $description, $limit = 200 ) {
+    $description = wp_strip_all_tags( (string) $description );
+    $description = trim( preg_replace( '/\s+/', ' ', $description ) );
+
+    if ( function_exists( 'mb_strlen' ) && mb_strlen( $description ) > $limit ) {
+      return mb_substr( $description, 0, $limit );
+    }
+
+    if ( strlen( $description ) > $limit ) {
+      return substr( $description, 0, $limit );
+    }
+
+    return $description;
+  }
+
+  /**
+   * Store currency symbol for builder pricing payloads.
+   */
+  protected function get_product_currency_symbol() {
+    if ( ! function_exists( 'get_woocommerce_currency_symbol' ) ) {
+      return '';
+    }
+
+    return html_entity_decode( get_woocommerce_currency_symbol(), ENT_QUOTES, 'UTF-8' );
+  }
+
+  /**
+   * Format WooCommerce prices consistently for builder display.
+   */
+  protected function format_product_price( $price ) {
+    if ( $price === '' || $price === null ) {
+      return '';
+    }
+
+    if ( function_exists( 'wc_format_decimal' ) ) {
+      return wc_format_decimal( $price, wc_get_price_decimals() );
+    }
+
+    return (string) $price;
   }
 
   /**
