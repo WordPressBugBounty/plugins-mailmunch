@@ -125,7 +125,7 @@ class Mailmunch_Public {
 		}
 
 		echo "<script type='text/javascript' data-cfasync='false'>";
-		echo "var _mmunch = {'front': false, 'page': false, 'post': false, 'category': false, 'author': false, 'search': false, 'attachment': false, 'tag': false};";
+		echo "var _mmunch = {'front': false, 'page': false, 'post': false, 'category': false, 'author': false, 'search': false, 'attachment': false, 'tag': false, 'cart': false, 'checkout': false};";
 		if (is_front_page() || is_home()) { echo "_mmunch['front'] = true;"; }
 		if (is_page()) { echo "_mmunch['page'] = true; _mmunch['pageData'] = ".json_encode($post_data).";"; }
 		if (is_single()) { echo "_mmunch['post'] = true; _mmunch['postData'] = ".json_encode($post_data)."; _mmunch['postCategories'] = ".json_encode(get_the_category())."; _mmunch['postTags'] = ".json_encode(get_the_tags())."; _mmunch['postAuthor'] = ".json_encode(array("name" => get_the_author_meta("display_name"), "ID" => get_the_author_meta("ID"))).";"; }
@@ -134,6 +134,8 @@ class Mailmunch_Public {
 		if (is_author()) { echo "_mmunch['author'] = true;"; }
 		if (is_tag()) { echo "_mmunch['tag'] = true;"; }
 		if (is_attachment()) { echo "_mmunch['attachment'] = true;"; }
+		if (function_exists('is_cart') && is_cart()) { echo "_mmunch['cart'] = true;"; }
+		if (function_exists('is_checkout') && is_checkout()) { echo "_mmunch['checkout'] = true;"; }
 		echo "</script>";
 		echo('<script data-cfasync="false" src="//a.mailmunch.co/app/v1/site.js" id="mailmunch-script" data-plugin="'.MAILMUNCH_PREFIX.'" data-mailmunch-site-id="'.$siteID.'" async></script>');
 
