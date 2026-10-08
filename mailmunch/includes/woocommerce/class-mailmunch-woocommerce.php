@@ -540,6 +540,38 @@ class Mailmunch_Woocommerce {
       'permission_callback' => array( $this, 'authorize_rest_request' ),
     ) );
 
+    register_rest_route( 'mailmunch/v1', '/coupons', array(
+      'methods' => 'POST',
+      'callback' => array( $this, 'create_coupon' ),
+      'permission_callback' => array( $this, 'authorize_rest_request' ),
+    ) );
+
+    register_rest_route( 'mailmunch/v1', '/coupons/(?P<id>\d+)', array(
+      'methods' => 'PUT',
+      'callback' => array( $this, 'update_coupon' ),
+      'permission_callback' => array( $this, 'authorize_rest_request' ),
+      'args' => array(
+        'id' => array(
+          'type' => 'integer',
+          'required' => true,
+          'sanitize_callback' => 'absint',
+        ),
+      ),
+    ) );
+
+    register_rest_route( 'mailmunch/v1', '/coupons/(?P<id>\d+)', array(
+      'methods' => 'DELETE',
+      'callback' => array( $this, 'delete_coupon' ),
+      'permission_callback' => array( $this, 'authorize_rest_request' ),
+      'args' => array(
+        'id' => array(
+          'type' => 'integer',
+          'required' => true,
+          'sanitize_callback' => 'absint',
+        ),
+      ),
+    ) );
+
     register_rest_route( 'mailmunch/v1', '/products', array(
       'methods' => 'GET',
       'callback' => array( $this, 'get_products' ),
@@ -578,6 +610,226 @@ class Mailmunch_Woocommerce {
         ),
       ),
     ) );
+  }
+
+  /**
+   * Create a WooCommerce coupon for MailMunch (master or per-subscriber dynamic).
+   */
+  public function create_coupon( WP_REST_Request $request ) {
+    if ( ! class_exists( 'WC_Coupon' ) ) {
+      return new WP_Error( 'mailmunch_woocommerce_unavailable', 'WooCommerce is not available', array( 'status' => 503 ) );
+    }
+
+    $params = $this->get_coupon_request_params( $request );
+    if ( is_wp_error( $params ) ) {
+      return $params;
+    }
+
+    $existing_id = wc_get_coupon_id_by_code( $params['code'] );
+    if ( $existing_id ) {
+      return new WP_Error(
+        'mailmunch_coupon_exists',
+        'A coupon with this code already exists',
+        array( 'status' => 409 )
+      );
+    }
+
+    $coupon = new WC_Coupon();
+    $this->apply_coupon_params( $coupon, $params );
+    $coupon->set_description( 'Coupon made by Mailmunch' );
+
+    $coupon_id = $coupon->save();
+    if ( ! $coupon_id || is_wp_error( $coupon_id ) ) {
+      $message = is_wp_error( $coupon_id ) ? $coupon_id->get_error_message() : 'Failed to create coupon';
+      return new WP_Error( 'mailmunch_coupon_create_failed', $message, array( 'status' => 422 ) );
+    }
+
+    return rest_ensure_response( array(
+      'id' => (int) $coupon_id,
+      'code' => $coupon->get_code(),
+    ) );
+  }
+
+  /**
+   * Update an existing WooCommerce coupon created by MailMunch.
+   */
+  public function update_coupon( WP_REST_Request $request ) {
+    if ( ! class_exists( 'WC_Coupon' ) ) {
+      return new WP_Error( 'mailmunch_woocommerce_unavailable', 'WooCommerce is not available', array( 'status' => 503 ) );
+    }
+
+    $coupon_id = (int) $request->get_param( 'id' );
+    $coupon = new WC_Coupon( $coupon_id );
+    if ( ! $coupon->get_id() ) {
+      return new WP_Error( 'mailmunch_coupon_not_found', 'Coupon not found', array( 'status' => 404 ) );
+    }
+
+    $params = $this->get_coupon_request_params( $request, false );
+    if ( is_wp_error( $params ) ) {
+      return $params;
+    }
+
+    if ( ! empty( $params['code'] ) ) {
+      $existing_id = wc_get_coupon_id_by_code( $params['code'] );
+      if ( $existing_id && (int) $existing_id !== $coupon_id ) {
+        return new WP_Error(
+          'mailmunch_coupon_exists',
+          'A coupon with this code already exists',
+          array( 'status' => 409 )
+        );
+      }
+    }
+
+    $this->apply_coupon_params( $coupon, $params );
+    $saved_id = $coupon->save();
+    if ( ! $saved_id || is_wp_error( $saved_id ) ) {
+      $message = is_wp_error( $saved_id ) ? $saved_id->get_error_message() : 'Failed to update coupon';
+      return new WP_Error( 'mailmunch_coupon_update_failed', $message, array( 'status' => 422 ) );
+    }
+
+    return rest_ensure_response( array(
+      'id' => (int) $coupon->get_id(),
+      'code' => $coupon->get_code(),
+    ) );
+  }
+
+  /**
+   * Delete a WooCommerce coupon created by MailMunch.
+   */
+  public function delete_coupon( WP_REST_Request $request ) {
+    if ( ! class_exists( 'WC_Coupon' ) ) {
+      return new WP_Error( 'mailmunch_woocommerce_unavailable', 'WooCommerce is not available', array( 'status' => 503 ) );
+    }
+
+    $coupon_id = (int) $request->get_param( 'id' );
+    $coupon = new WC_Coupon( $coupon_id );
+    if ( ! $coupon->get_id() ) {
+      return new WP_Error( 'mailmunch_coupon_not_found', 'Coupon not found', array( 'status' => 404 ) );
+    }
+
+    $deleted = $coupon->delete( true );
+    if ( ! $deleted ) {
+      return new WP_Error( 'mailmunch_coupon_delete_failed', 'Failed to delete coupon', array( 'status' => 422 ) );
+    }
+
+    return rest_ensure_response( array(
+      'id' => $coupon_id,
+      'deleted' => true,
+    ) );
+  }
+
+  /**
+   * Normalize and validate coupon payload from MailMunch.
+   *
+   * @param WP_REST_Request $request
+   * @param bool            $require_code Whether code is required (create).
+   * @return array|WP_Error
+   */
+  protected function get_coupon_request_params( WP_REST_Request $request, $require_code = true ) {
+    $body = $request->get_json_params();
+    if ( ! is_array( $body ) ) {
+      $body = array();
+    }
+
+    $code = isset( $body['code'] ) ? wc_format_coupon_code( sanitize_text_field( $body['code'] ) ) : '';
+    if ( $require_code && $code === '' ) {
+      return new WP_Error( 'mailmunch_coupon_code_required', 'Coupon code is required', array( 'status' => 422 ) );
+    }
+
+    $discount_type = isset( $body['discount_type'] ) ? sanitize_text_field( $body['discount_type'] ) : 'percent';
+    if ( ! in_array( $discount_type, array( 'percent', 'fixed_cart', 'fixed_product' ), true ) ) {
+      // Accept MailMunch aliases.
+      if ( $discount_type === 'percentage' ) {
+        $discount_type = 'percent';
+      } elseif ( $discount_type === 'fixed' ) {
+        $discount_type = 'fixed_cart';
+      } else {
+        return new WP_Error( 'mailmunch_coupon_invalid_type', 'Invalid discount type', array( 'status' => 422 ) );
+      }
+    }
+
+    $amount = isset( $body['amount'] ) ? wc_format_decimal( $body['amount'] ) : null;
+    if ( $amount === null && isset( $body['discount_value'] ) ) {
+      $amount = wc_format_decimal( $body['discount_value'] );
+    }
+    if ( $amount === null || $amount === '' ) {
+      return new WP_Error( 'mailmunch_coupon_amount_required', 'Discount amount is required', array( 'status' => 422 ) );
+    }
+
+    $params = array(
+      'code' => $code,
+      'discount_type' => $discount_type,
+      'amount' => $amount,
+      'individual_use' => ! empty( $body['individual_use'] ),
+    );
+
+    if ( array_key_exists( 'minimum_amount', $body ) || array_key_exists( 'minimum_order_value', $body ) ) {
+      $minimum = array_key_exists( 'minimum_amount', $body ) ? $body['minimum_amount'] : $body['minimum_order_value'];
+      $params['minimum_amount'] = ( $minimum === null || $minimum === '' ) ? '' : wc_format_decimal( $minimum );
+    }
+
+    if ( ! empty( $body['limit_usage'] ) && isset( $body['usage_limit'] ) ) {
+      $params['usage_limit'] = absint( $body['usage_limit'] );
+    } elseif ( array_key_exists( 'usage_limit', $body ) ) {
+      $params['usage_limit'] = ( $body['usage_limit'] === null || $body['usage_limit'] === '' )
+        ? null
+        : absint( $body['usage_limit'] );
+    } elseif ( ! empty( $body['limit_usage'] ) && isset( $body['max_usage_count'] ) ) {
+      $params['usage_limit'] = absint( $body['max_usage_count'] );
+    }
+
+    if ( ! empty( $body['once_per_customer'] ) || ! empty( $body['usage_limit_per_user'] ) ) {
+      $params['usage_limit_per_user'] = ! empty( $body['usage_limit_per_user'] )
+        ? absint( $body['usage_limit_per_user'] )
+        : 1;
+    } elseif ( array_key_exists( 'once_per_customer', $body ) && empty( $body['once_per_customer'] ) ) {
+      $params['usage_limit_per_user'] = 0;
+    }
+
+    if ( array_key_exists( 'email_restrictions', $body ) ) {
+      $emails = $body['email_restrictions'];
+      if ( ! is_array( $emails ) ) {
+        $emails = array( $emails );
+      }
+      $params['email_restrictions'] = array_values( array_filter( array_map( function( $email ) {
+        return sanitize_email( is_string( $email ) ? $email : '' );
+      }, $emails ) ) );
+    }
+
+    return $params;
+  }
+
+  /**
+   * Apply normalized params onto a WC_Coupon instance.
+   *
+   * @param WC_Coupon $coupon
+   * @param array     $params
+   */
+  protected function apply_coupon_params( WC_Coupon $coupon, array $params ) {
+    if ( ! empty( $params['code'] ) ) {
+      $coupon->set_code( $params['code'] );
+    }
+    if ( isset( $params['discount_type'] ) ) {
+      $coupon->set_discount_type( $params['discount_type'] );
+    }
+    if ( isset( $params['amount'] ) ) {
+      $coupon->set_amount( $params['amount'] );
+    }
+    if ( array_key_exists( 'minimum_amount', $params ) ) {
+      $coupon->set_minimum_amount( $params['minimum_amount'] );
+    }
+    if ( array_key_exists( 'usage_limit', $params ) ) {
+      $coupon->set_usage_limit( $params['usage_limit'] );
+    }
+    if ( array_key_exists( 'usage_limit_per_user', $params ) ) {
+      $coupon->set_usage_limit_per_user( $params['usage_limit_per_user'] );
+    }
+    if ( isset( $params['individual_use'] ) ) {
+      $coupon->set_individual_use( (bool) $params['individual_use'] );
+    }
+    if ( array_key_exists( 'email_restrictions', $params ) ) {
+      $coupon->set_email_restrictions( $params['email_restrictions'] );
+    }
   }
 
   /**
@@ -875,6 +1127,7 @@ class Mailmunch_Woocommerce {
 
     return (string) $price;
   }
+
 
   /**
    * URL Mailmunch should POST to for MM → WooCommerce customer sync.

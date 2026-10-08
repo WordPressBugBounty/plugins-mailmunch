@@ -3,7 +3,7 @@ Contributors: mailmunch, lizgannes
 Tags: signup form, newsletter, newsletters, subscribe, popup, exit popup, exit intent, subscribers, subscription, popover, lightbox, analytics, collect email, optin, optin form, optin forms, double optin, list builder, email form, lead, leads, mailchimp, mailchimp form, mailchimp newsletter, mailchimp plugin, mailchimp signup, mailchimp signup forms, mailchimp signup form, mailchimp widget, mailchimp subscribe, constant contact, contact contact form, constant contact newsletter, constant contact plugin, constant contact signup, constant contact signup forms, constant contact signup form, constant contact widget, constant contact subscribe, aweber, aweber form, aweber forms, aweber signup form, aweber plugin
 Requires at least: 3.0.1
 Tested up to: 7.0
-Stable tag: 3.2.9
+Stable tag: 3.3.0
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -162,6 +162,13 @@ Why people use AWeber
 7. Another example from a user site
 
 == Changelog ==
+
+= 3.3.0 - Oct 8, 2026 =
+* WooCommerce: REST endpoints to create, update, and delete coupons for MailMunch coupon sync
+* WooCommerce: support email_restrictions on coupons (restrict dynamic codes to the recipient email)
+
+= 3.2.9 - Sep 30, 2026 =
+* Extend display rules to support wordpress cart and checkout pages
 
 = 3.2.6 - Sep 28, 2026 =
 * Add functionality for products
