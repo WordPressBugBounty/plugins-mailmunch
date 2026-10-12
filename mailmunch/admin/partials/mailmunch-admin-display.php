@@ -13,6 +13,8 @@
  */
 ?>
 
-<form id="unlink-account" action="<?php echo esc_url(add_query_arg( array('step' => 'sign_out') )); ?>" method="POST"></form>
+<form id="unlink-account" action="<?php echo esc_url( add_query_arg( array( 'step' => 'sign_out' ) ) ); ?>" method="POST">
+	<?php wp_nonce_field( 'mailmunch_sign_out' ); ?>
+</form>
 
 <?php echo $this->mailmunch_api->getWidgetsHtml(); ?>

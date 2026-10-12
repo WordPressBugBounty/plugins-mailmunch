@@ -341,13 +341,21 @@ class Mailmunch_Admin {
 	}
 
 	public function init() {
-		$step = isset($_GET['step']) ? $_GET['step'] : '';
-		if ($step == 'sign_out') {
-			$this->initiate_api();
-			$this->mailmunch_api->signOutUser();
-			$url = admin_url('admin.php?page='. MAILMUNCH_SLUG);
-			wp_redirect($url);
+		$step = isset( $_REQUEST['step'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['step'] ) ) : '';
+		if ( 'sign_out' !== $step ) {
+			return;
 		}
+
+		if ( ! isset( $_REQUEST['_wpnonce'] )
+			|| ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_REQUEST['_wpnonce'] ) ), 'mailmunch_sign_out' )
+			|| ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'Permission denied.', 'mailmunch' ), 403 );
+		}
+
+		$this->initiate_api();
+		$this->mailmunch_api->signOutUser();
+		wp_safe_redirect( admin_url( 'admin.php?page=' . MAILMUNCH_SLUG ) );
+		exit;
 	}
 	
 	/**
