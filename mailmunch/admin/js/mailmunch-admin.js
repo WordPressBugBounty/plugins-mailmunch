@@ -120,9 +120,8 @@
           if (!data.success) {
             $('.signup-alert').html(data.message).show();
           } else {
-            if (typeof mailmunchTrack != 'undefined') {
-              mailmunchTrack.track_all('CompleteRegistration');
-            }
+            // Mixpanel CompleteRegistration is fired server-side in Rails wp_sign_up
+            // (mailmunchTrack is usually unavailable in WP admin).
             setTimeout(function() { window.location.reload();	}, 500);
           }
         },
