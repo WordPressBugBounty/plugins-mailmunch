@@ -1060,6 +1060,69 @@ class Mailmunch_Woocommerce {
   }
 
   /**
+   * Featured + gallery image URLs for MailMunch product tool.
+   * Featured image is first and marked isDefault; gallery IDs follow without duplicates.
+   *
+   * @param WC_Product $product Product instance.
+   * @return array{image: string, images: array<int, array{id: string, url: string, isDefault: bool}>}
+   */
+  protected function get_product_images_for_mailmunch( WC_Product $product ) {
+    $images = array();
+    $seen_ids = array();
+
+    $featured_id = $product->get_image_id();
+    if ( $featured_id ) {
+      $featured_url = wp_get_attachment_image_url( (int) $featured_id, 'full' );
+      if ( $featured_url ) {
+        $featured_id_str = (string) $featured_id;
+        $images[] = array(
+          'id' => $featured_id_str,
+          'url' => $featured_url,
+          'isDefault' => true,
+        );
+        $seen_ids[ $featured_id_str ] = true;
+      }
+    }
+
+    $gallery_ids = $product->get_gallery_image_ids();
+    if ( ! empty( $gallery_ids ) && is_array( $gallery_ids ) ) {
+      foreach ( $gallery_ids as $gallery_id ) {
+        $gallery_id = (int) $gallery_id;
+        if ( ! $gallery_id ) {
+          continue;
+        }
+
+        $gallery_id_str = (string) $gallery_id;
+        if ( isset( $seen_ids[ $gallery_id_str ] ) ) {
+          continue;
+        }
+
+        $gallery_url = wp_get_attachment_image_url( $gallery_id, 'full' );
+        if ( ! $gallery_url ) {
+          continue;
+        }
+
+        $images[] = array(
+          'id' => $gallery_id_str,
+          'url' => $gallery_url,
+          'isDefault' => false,
+        );
+        $seen_ids[ $gallery_id_str ] = true;
+      }
+    }
+
+    $default_image = '';
+    if ( ! empty( $images ) ) {
+      $default_image = $images[0]['url'];
+    }
+
+    return array(
+      'image' => $default_image,
+      'images' => $images,
+    );
+  }
+
+  /**
    * Normalize a WooCommerce product for MailMunch builders.
    */
   protected function format_product_for_mailmunch( WC_Product $product ) {
@@ -1070,15 +1133,15 @@ class Mailmunch_Woocommerce {
 
     $description = $this->get_product_excerpt( $description, 200 );
 
-    $image_id = $product->get_image_id();
-    $image = $image_id ? wp_get_attachment_image_url( $image_id, 'full' ) : '';
+    $image_data = $this->get_product_images_for_mailmunch( $product );
     $pricing = $this->get_product_pricing_for_mailmunch( $product );
 
     return array(
       'id' => (string) $product->get_id(),
       'title' => $product->get_name(),
       'description' => $description,
-      'image' => $image ? $image : '',
+      'image' => $image_data['image'],
+      'images' => $image_data['images'],
       'pricing' => $pricing,
       'link' => $product->get_permalink(),
     );
